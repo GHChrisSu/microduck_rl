@@ -13,6 +13,7 @@ CLI can validate an ONNX file without a GPU.
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -392,11 +393,31 @@ def render_readme(manifest: dict[str, Any], repo_id: str, base_model: str | None
         lines += ["", f"A remix of [{base_model}](https://huggingface.co/{base_model})."]
     if training:
         lines += ["", "## Training", ""]
-        for key in ("task_id", "repo", "branch", "commit", "run", "checkpoint", "exported"):
+        for key in ("task_id", "repo", "branch", "commit", "run", "checkpoint", "seed", "base", "started", "exported"):
             if key in training:
                 lines.append(f"- **{key}**: `{training[key]}`")
         if training.get("dirty"):
             lines.append("- exported from a checkout with uncommitted changes")
+    if training.get("command") and training.get("repo") and training.get("commit"):
+        # Same code, same lock file, same command, same seed: the recipe in full. What it does
+        # not promise is the same weights — GPU RL is not bit-reproducible across machines.
+        clone_dir = Path(training["repo"].rstrip("/")).name.removesuffix(".git")
+        lines += [
+            "",
+            "## Reproduce",
+            "",
+            "Same code, same `uv.lock`, same command, same seed. Training it again yields a "
+            "comparable policy, not the same weights: GPU reinforcement learning is not "
+            "bit-reproducible across machines.",
+            "",
+            "```bash",
+            f"git clone {training['repo']}",
+            f"cd {clone_dir}",
+            f"git checkout {training['commit']}",
+            "uv sync",
+            "uv run " + " ".join(shlex.quote(str(a)) for a in training["command"]),
+            "```",
+        ]
     return "\n".join(lines) + "\n"
 
 
