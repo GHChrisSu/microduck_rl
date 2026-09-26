@@ -56,7 +56,70 @@ def load_bam_model(kp_fw: float, vin: float, max_current):
     return bam_model
 
 
-def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gain, vin_min):
+# ---------------------------------------------------------------------------
+# Soft carpet (mirrors mdp.randomize_ground_softness used in training)
+# ---------------------------------------------------------------------------
+# Training carpet = floor contact with a "pile" margin (contact + friction start
+# `thickness` above the surface) and a soft/lossy spring. Softness is tied to
+# thickness along the training curriculum: 4 mm ~ tc 0.06, 6 mm ~ 0.10,
+# 10 mm (the shag that reproduces the forward trip) ~ 0.20, 12 mm ~ 0.25.
+_CARPET_TC_TABLE = [(0.0, 0.02), (4.0, 0.06), (6.0, 0.10), (10.0, 0.20), (12.0, 0.25)]
+CARPET_SIZE_XY = (4.0, 2.0)     # m, centred on the origin, long side along x
+_FLOOR_EXTENT = 50.0            # m, half-size of the hard floor around the carpet
+
+
+def carpet_params(thickness_mm: float, timeconst=None, dampratio=2.0):
+    xs, ys = zip(*_CARPET_TC_TABLE)
+    tc = float(np.interp(thickness_mm, xs, ys)) if timeconst is None else timeconst
+    width = max(0.001, tc / 10.0)
+    return dict(margin=thickness_mm / 1000.0, solref=(tc, dampratio),
+                solimp=(0.9, 0.95, width, 0.5, 2.0))
+
+
+def add_carpet_to_spec(spec, thickness_mm: float, full_floor: bool = False, timeconst=None):
+    """Soft carpet: a 4x2 m patch at the origin (hard floor elsewhere) or the whole floor.
+
+    Patch: the floor plane becomes visual-only and the hard floor is rebuilt as
+    4 boxes AROUND the carpet (so there is no rigid surface under the pile, as
+    in training). The carpet box has contact priority 2 so its solref/solimp
+    win over the feet (training writes the carpet values onto the feet, which
+    carry priority 1 there). Margin is max-combined → the pile thickness.
+    """
+    cp = carpet_params(thickness_mm, timeconst)
+    floor = spec.geom("floor")
+    if floor is None:
+        raise RuntimeError("--carpet needs a scene with a geom named 'floor'")
+    if full_floor:
+        floor.solref = cp["solref"]; floor.solimp = cp["solimp"]; floor.margin = cp["margin"]
+        floor.priority = 2
+        floor.rgba = [0.55, 0.25, 0.2, 1.0]; floor.material = ""
+        print(f"Carpet: WHOLE floor, pile {thickness_mm:.1f} mm, solref {cp['solref']}, solimp width {cp['solimp'][2]:.4f}")
+        return cp
+    wb = spec.worldbody
+    floor.contype = 0; floor.conaffinity = 0          # visual only
+    floor.pos = [0, 0, -0.0005]                        # avoid z-fighting with the carpet
+    cx, cy = CARPET_SIZE_XY[0] / 2, CARPET_SIZE_XY[1] / 2
+    E, H = _FLOOR_EXTENT, 0.05
+    for name, (x, y, hx, hy) in {
+        "hard_floor_front": ((cx + E) / 2, 0.0, (E - cx) / 2, E),
+        "hard_floor_back": (-(cx + E) / 2, 0.0, (E - cx) / 2, E),
+        "hard_floor_left": (0.0, (cy + E) / 2, cx, (E - cy) / 2),
+        "hard_floor_right": (0.0, -(cy + E) / 2, cx, (E - cy) / 2),
+    }.items():
+        wb.add_geom(name=name, type=mujoco.mjtGeom.mjGEOM_BOX, pos=[x, y, -H], size=[hx, hy, H],
+                    rgba=[0, 0, 0, 0], group=3)
+    wb.add_geom(name="carpet", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, -H], size=[cx, cy, H],
+                rgba=[0, 0, 0, 0], group=3, priority=2, margin=cp["margin"],
+                solref=list(cp["solref"]), solimp=list(cp["solimp"]))
+    t = max(thickness_mm / 1000.0, 0.0005)
+    wb.add_geom(name="carpet_visual", type=mujoco.mjtGeom.mjGEOM_BOX, pos=[0, 0, t / 2], size=[cx, cy, t / 2],
+                rgba=[0.55, 0.25, 0.2, 0.55], contype=0, conaffinity=0, group=0)
+    print(f"Carpet: {CARPET_SIZE_XY[0]:.0f}x{CARPET_SIZE_XY[1]:.0f} m patch at origin (long side along x), "
+          f"pile {thickness_mm:.1f} mm, solref {cp['solref']}, solimp width {cp['solimp'][2]:.4f}; hard floor outside")
+    return cp
+
+
+def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gain, vin_min, spec_edit=None):
     """Load the scene and hand every non-passive actuator to bam.mujoco.MujocoController.
 
     Mirrors bam.mjlab.BamActuator.edit_spec (what warp does at training time):
@@ -72,6 +135,8 @@ def load_mujoco_with_bam(xml_path: str, bam_model, timestep: float, vin_drop_gai
     force_limit = bam_model.actuator.vin * kt / R
 
     spec = mujoco.MjSpec.from_file(xml_path)
+    if spec_edit is not None:
+        spec_edit(spec)
     names = []
     for act in spec.actuators:
         tgt = act.target
@@ -1221,6 +1286,17 @@ def main():
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
                              "compliant PU sole. e.g. --foot-solref 0.04")
+    parser.add_argument("--carpet", action="store_true",
+                        help="Add a soft carpet (4x2 m patch centred on the spawn, long side along x; "
+                             "hard floor outside) mirroring the training carpet DR.")
+    parser.add_argument("--carpet-thickness", "--carpet_thickness", type=float, default=10.0,
+                        help="Carpet pile thickness in mm (default %(default)s = the shag that reproduces "
+                             "the forward trip). Softness follows the training curriculum: 4 mm~tc 0.06, "
+                             "6~0.10, 10~0.20, 12~0.25 (training max).")
+    parser.add_argument("--carpet-timeconst", type=float, default=None,
+                        help="Override the carpet solref time constant (s) instead of deriving it from thickness.")
+    parser.add_argument("--carpet-full", action="store_true",
+                        help="Make the WHOLE floor carpet instead of the 4x2 m patch.")
     parser.add_argument("--odom-anchor-points", nargs="?", const="all", default=None, metavar="SETS",
                         help="Draw the odometry's candidate contact points on both feet, from "
                              "scripts/odom_anchor_sets.json: 'all' (default when given bare) or a "
@@ -1270,6 +1346,10 @@ def main():
     else:
         xml_path = MICRODUCK_XML
     print(f"Loading MuJoCo model from: {xml_path}")
+    carpet_edit = None
+    if args.carpet or args.carpet_full:
+        carpet_edit = lambda sp: add_carpet_to_spec(sp, args.carpet_thickness, full_floor=args.carpet_full,
+                                                    timeconst=args.carpet_timeconst)
     bam_ctrl = None
     if not args.no_bam:
         # Same actuator the policies are trained against in warp (BAM M6 XL330,
@@ -1279,9 +1359,12 @@ def main():
         bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit)
         vin_drop_gain = args.vin_drop_gain if args.vin_drop_gain > 0 else None
         model, data, bam_ctrl, _bam_names = load_mujoco_with_bam(
-            xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)
+            xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN, spec_edit=carpet_edit)
     else:
-        model = mujoco.MjModel.from_xml_path(xml_path)
+        _spec = mujoco.MjSpec.from_file(xml_path)
+        if carpet_edit is not None:
+            carpet_edit(_spec)
+        model = _spec.compile()
         model.opt.timestep = 0.005
         data = mujoco.MjData(model)
         print("Legacy MuJoCo position actuators (--no-bam): NOT the actuator the policy was trained with")
