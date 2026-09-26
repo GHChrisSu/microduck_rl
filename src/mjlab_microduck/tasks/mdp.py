@@ -7389,3 +7389,99 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ---------------------------------------------------------------------------
+# Soft-carpet ground DR (branch soft_carpet, 2026-09)
+# ---------------------------------------------------------------------------
+
+def _terrain_geom_ids(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """All geom ids of the ``terrain`` body (one plane on flat, many boxes/hfields on rough). Cached."""
+    ids = getattr(env, "_terrain_geom_ids_cache", None)
+    if ids is None:
+        m = env.sim.mj_model
+        bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "terrain")
+        if bid < 0:
+            raise ValueError("randomize_ground_softness: no body named 'terrain' in the scene")
+        ids = torch.as_tensor(np.nonzero(m.geom_bodyid == bid)[0], device=env.device, dtype=torch.long)
+        env._terrain_geom_ids_cache = ids
+    return ids
+
+
+def _priority_foot_geom_ids(env: ManagerBasedRlEnv, pattern: str) -> torch.Tensor:
+    """Geom ids whose (possibly entity-prefixed) name matches ``pattern``. Cached per pattern."""
+    import re
+    cache = getattr(env, "_carpet_foot_geom_cache", {})
+    if pattern not in cache:
+        m = env.sim.mj_model
+        rx = re.compile(pattern)
+        ids = [g for g in range(m.ngeom) if rx.search(mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "")]
+        cache[pattern] = torch.as_tensor(ids, device=env.device, dtype=torch.long)
+        env._carpet_foot_geom_cache = cache
+    return cache[pattern]
+
+
+@requires_model_fields("geom_solref", "geom_solimp", "geom_margin")
+def randomize_ground_softness(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    carpet_prob: float = 0.5,
+    timeconst_range: tuple[float, float] = (0.02, 0.10),
+    dampratio_range: tuple[float, float] = (1.0, 2.0),
+    width_range: tuple[float, float] = (0.001, 0.01),
+    margin_range: tuple[float, float] = (0.0, 0.006),
+    foot_geom_pattern: str = r"(^|/)(left|right)_foot_collision$",
+):
+    """Per-episode soft-carpet floor (NON-accumulating: absolute writes / restore defaults).
+
+    A carpet env gets a compliant, lossy floor: solref timeconst/dampratio and
+    solimp width soften the contact spring (foot sinks, ankle push-off loses
+    authority), and geom_margin adds a "pile" layer: contact (and FRICTION)
+    starts ``margin`` above the true surface, so a low swing toe brushes the
+    pile and gets dragged — the forward-trip mechanism on a real carpet.
+
+    PRIORITY GOTCHA: the foot collision geoms have priority 1 (FULL_COLLISION),
+    so for foot-floor contacts MuJoCo uses the FOOT's solref/solimp/friction
+    exclusively and ignores the floor's. Softness is therefore written to both
+    the terrain geoms (every other body part landing on the carpet: averaged
+    with the robot's default by solmix) and the foot geoms (exact value).
+    Margin is max-combined regardless of priority, so it goes on the terrain.
+    Hard envs restore compile-time defaults (incl. rough-terrain softening).
+    """
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    env_ids = env_ids.to(env.device, dtype=torch.long)
+    n = env_ids.numel()
+    if n == 0:
+        return
+    dev = env.device
+    model = env.sim.model
+    tg = _terrain_geom_ids(env)
+    fg = _priority_foot_geom_ids(env, foot_geom_pattern)
+    gids = torch.cat([tg, fg])
+    is_terrain = torch.zeros(gids.numel(), dtype=torch.bool, device=dev)
+    is_terrain[: tg.numel()] = True
+    G = gids.numel()
+
+    ref = env.sim.get_default_field("geom_solref")[gids].to(dev).unsqueeze(0).repeat(n, 1, 1)
+    imp = env.sim.get_default_field("geom_solimp")[gids].to(dev).unsqueeze(0).repeat(n, 1, 1)
+    mar = env.sim.get_default_field("geom_margin")[gids].to(dev).unsqueeze(0).repeat(n, 1)
+
+    carpet = torch.rand(n, device=dev) < carpet_prob
+    k = int(carpet.sum())
+    if k > 0:
+        def _u(r):
+            return torch.empty(k, 1, device=dev).uniform_(r[0], r[1]).expand(k, G)
+        ref[carpet, :, 0] = _u(timeconst_range)
+        ref[carpet, :, 1] = _u(dampratio_range)
+        imp[carpet, :, 2] = _u(width_range)
+        m_s = _u(margin_range)
+        mar[carpet] = torch.where(is_terrain.unsqueeze(0), m_s, mar[carpet])
+
+    eg, gg = torch.meshgrid(env_ids, gids, indexing="ij")
+    model.geom_solref[eg, gg] = ref
+    model.geom_solimp[eg, gg] = imp
+    model.geom_margin[eg, gg] = mar
+    if not hasattr(env, "_carpet_mask"):
+        env._carpet_mask = torch.zeros(env.num_envs, dtype=torch.bool, device=dev)
+    env._carpet_mask[env_ids] = carpet

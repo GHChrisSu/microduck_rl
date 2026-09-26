@@ -345,6 +345,30 @@ FALLEN_TIMEOUT_S = 8.0
 # fix (2): side_prob puts that fraction of the prone slice ON A SIDE (the
 # dominant natural fall end-state, 79% in eval); the rest splits by face_down_prob.
 # Crouch slice 0.15 → 0.20 and from iter 150: it doubles as stand-tall data.
+# SOFT CARPET (branch soft_carpet, 2026-09). Real robot trips forward and runs
+# away on a soft carpet. Reproduced in sim with randomize_ground_softness
+# (claude_experiments/carpet_eval.py, fhathosb@3750 ≈ deployed): 4-6 mm pile /
+# tc ≤ 0.1 → 0-1% falls, but a 10 mm shag (foot tc 0.2, dr 2, width 0.02) →
+# 98% falls at vx 0.3, achieved vx 0.36 > cmd, pitched forward: the exact
+# failure. carpet_prob 0.5 keeps the hard-floor walk in-distribution. Severity
+# ramps (this run starts at step 0: MICRODUCK_WARM_START=1) so the shock of a
+# policy that falls 98% on the hardest carpets doesn't hit the critic at once.
+ENABLE_SOFT_CARPET = True
+CARPET_PROB = 0.5
+CARPET_STAGES = [   # (iter, max timeconst, max solimp width, max pile margin m)
+    (0,   0.10, 0.010, 0.006),   # measured harmless for the current policy
+    (300, 0.15, 0.015, 0.008),
+    (700, 0.20, 0.020, 0.010),   # shag: the reproduced failure case
+    (1200, 0.25, 0.025, 0.012),  # margin beyond the reproduced case
+]
+CARPET_RAMP_STAGES = [
+    {"step": it * NUM_STEPS_PER_ENV, "params": {
+        "carpet_prob": CARPET_PROB,
+        "timeconst_range": (0.02, tc), "dampratio_range": (1.0, 2.0),
+        "width_range": (0.001, w), "margin_range": (0.0, mg)}}
+    for it, tc, w, mg in CARPET_STAGES
+]
+
 _PRONE_ITERS = (150, 700, 1000, 1400) if WARM_START else (800, 1500, 2000, 2500)
 PRONE_SIDE_PROB = 0.5
 PRONE_RAMP_STAGES = [
@@ -641,6 +665,20 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
             "param_stages": PRONE_RAMP_STAGES,
         },
     )
+
+    if ENABLE_SOFT_CARPET:
+        # Floor compliance + pile margin, written to terrain AND foot geoms (the
+        # feet have contact priority 1, so the floor's solref alone is ignored).
+        cfg.events["ground_softness"] = EventTermCfg(
+            func=microduck_mdp.randomize_ground_softness,
+            mode="reset",
+            params=dict(CARPET_RAMP_STAGES[0 if not play else -1]["params"]),
+        )
+        if not play:
+            cfg.curriculum["carpet_severity"] = CurriculumTermCfg(
+                func=microduck_mdp.event_param_curriculum,
+                params={"event_name": "ground_softness", "param_stages": CARPET_RAMP_STAGES},
+            )
 
     # Recovery economics ramp: tax + bounty OFF until the walk is established
     # (see RECOVERY_ECON_KICKIN_ITER note above — run-3 crouch-freeze lesson).
