@@ -157,17 +157,20 @@ FULL_COLLISION = CollisionCfg(
 # Exclude passive_* joints (jaw linkage in the new model has no XML actuator).
 # Voltage domain randomization (mirrors mjlab_microban):
 #   - vin_range: per-env battery voltage sampled at startup (replaces fixed vin)
-#   - vin_drop_gain_range: load-dependent voltage sag V_drop = gain * sum(|tau|)
+#   - vin_drop_resistance_range: battery + wire resistance [Ohm], sag V_drop = R * I_bus
+#     (0.075 Ohm = the old 0.2 V/Nm torque-gain ceiling x M288 kt 0.366)
 #   - vin_min: hard floor on the effective voltage after sag
-# kp_fw kept at 200 (microduck's preserved firmware stiffness; microban uses 125).
+# Servos: XL330-M077-T (77:1 gearbox, BAM m6 identified 2026-09; bundled in bam
+# as "xl330m077"). The M288 ran firmware kp 200; at the same kp the M077's
+# position loop is ~3.7x softer, so the firmware P gain is raised to 400.
 _BAM_ACTUATOR_KWARGS = dict(
-    motor_name="xl330",
+    motor_name="xl330m077",
     model="m6",
     target_names_expr=(r"^(?!passive_).*",),
-    kp_fw=200.0,  # microduck's preserved firmware stiffness (microban uses 125)
+    kp_fw=400.0,  # M077 firmware P gain (M288 ran 200)
     # vin_range=(6.9, 7.9),
     vin_range=(6.5, 8.2),
-    vin_drop_gain_range=(0.0, 0.2),
+    vin_drop_resistance_range=(0.0, 0.075),
     vin_min=6.0,
     # max_current=1.75,
     delay_min_lag=3,

@@ -167,7 +167,8 @@ def rollout_sim_bam(onnx_path: str, total_time: float, seed: int, action_scale: 
     mujoco.mj_forward(model, data)
 
     bam_ctrl = MujocoController(bam_model, ACTUATOR_NAME, model, data)
-    bam_ctrl.reset(data.qpos)
+    bam_ctrl.reset()
+    bam_ctrl.q_target[:] = data.qpos[bam_ctrl.qpos_indexes]
 
     runner = PolicyRunner(onnx_path, action_scale=action_scale)
     policy_targets = make_target_schedule(total_time, seed=seed)
