@@ -1,6 +1,6 @@
 """Checkpoint uploader run inside an HF Job.
 
-Watches `logs/rsl_rl/**/model_*.pt` (with the run's params and `provenance.json`) and uploads new/updated files to the
+Watches `logs/rsl_rl/**/model_*.pt` (with the run's params, `provenance.json` and TensorBoard files) and uploads new/updated files to the
 target HF Model repo. Run as `python -m mjlab_microduck.hf_uploader` from the job bootstrap
 (a module, because the job's tarball may be a dependent repo with no scripts/ of ours), with
 auth coming from the HF_TOKEN secret injected by `hf jobs run`. `scripts/hf/uploader.py` still
@@ -18,11 +18,13 @@ from huggingface_hub import HfApi, CommitOperationAdd
 
 
 def _watched(root: Path) -> list[Path]:
-    """The checkpoints, the dumped configs and the provenance `publish --run` needs."""
+    """The checkpoints, the dumped configs, the provenance `publish --run` needs, and the
+    TensorBoard files the workshop draws its curve from (re-sent as they grow)."""
     files = list(root.glob("**/model_*.pt"))
     files += root.glob("**/params/*.yaml")
     files += root.glob("**/params/*.json")
     files += root.glob("**/provenance.json")
+    files += root.glob("**/events.out.tfevents.*")
     return files
 
 

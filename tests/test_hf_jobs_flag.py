@@ -225,14 +225,56 @@ def test_the_uploader_is_a_module_and_the_script_delegates():
 
 
 def test_the_uploader_pushes_what_publish_run_reads(tmp_path):
-    """A cloud run pulled back into logs/ must carry its provenance, or `publish --run` refuses it."""
+    """A cloud run pulled back into logs/ must carry its provenance, or `publish --run` refuses
+    it, and its TensorBoard file, or the workshop has no curve to draw for it."""
     from mjlab_microduck.hf_uploader import _watched
 
-    for name in ("run/model_10.pt", "run/params/env.yaml", "run/provenance.json", "run/other.txt"):
+    names = (
+        "run/model_10.pt",
+        "run/params/env.yaml",
+        "run/provenance.json",
+        "run/events.out.tfevents.1790586250.host.3263.0",
+        "run/other.txt",
+    )
+    for name in names:
         (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
         (tmp_path / name).write_text("x")
     watched = {p.relative_to(tmp_path).as_posix() for p in _watched(tmp_path)}
-    assert watched == {"run/model_10.pt", "run/params/env.yaml", "run/provenance.json"}
+    assert watched == set(names) - {"run/other.txt"}
+
+
+def test_auto_export_finds_the_checkpoint_in_the_run_directory(tmp_path):
+    """Runs are logs/rsl_rl/<experiment>/<stamp>_<name>/model_<N>.pt. The glob one level up
+    found nothing ("no checkpoint found" on every job), and export opens --checkpoint-file as a
+    path, so it must get the path, not the file's bare name."""
+    from mjlab_microduck import hf_jobs
+
+    assert hf_jobs.EXPORT_STEP in hf_jobs.BOOTSTRAP
+    run = tmp_path / "logs" / "rsl_rl" / "sprint_2m" / "2026-09-28_10-00-00_first"
+    run.mkdir(parents=True)
+    for n in (0, 50, 100):
+        checkpoint = run / f"model_{n}.pt"
+        checkpoint.write_text("x")
+        os.utime(checkpoint, (1_000 + n, 1_000 + n))  # the last one saved is the newest
+    fakes = tmp_path / "bin"
+    fakes.mkdir()
+    calls = tmp_path / "uv-calls"
+    # Fails, so the upload after the export is never reached.
+    (fakes / "uv").write_text(f'#!/bin/sh\necho "$@" >> {calls}\nexit 1\n')
+    (fakes / "uv").chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fakes}{os.pathsep}{os.environ['PATH']}",
+        "TRAIN_RC": "0",
+        "TRAIN_ARGS": "Mjlab-Sprint2m-MicroDuck --agent.seed 1",
+    }
+    proc = subprocess.run(
+        ["bash", "-c", hf_jobs.EXPORT_STEP], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert "no checkpoint found" not in proc.stdout, proc.stdout + proc.stderr
+    first = calls.read_text().splitlines()[0]
+    assert first.startswith("run python -m mjlab_microduck.export Mjlab-Sprint2m-MicroDuck")
+    assert "--checkpoint-file logs/rsl_rl/sprint_2m/2026-09-28_10-00-00_first/model_100.pt" in first
 
 
 def test_the_uploader_module_refuses_to_run_without_a_repo():

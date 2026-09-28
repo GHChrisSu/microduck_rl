@@ -45,6 +45,39 @@ DEFAULT_IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
 DEFAULT_FLAVOR = "l4x1"
 DEFAULT_TIMEOUT = "12h"
 
+# Run after training, while the env is still warm. Its own constant so a test can run it in bash.
+EXPORT_STEP = r"""
+# Auto-export the final checkpoint to daemon-ready ONNX while the env is
+# still warm — a separate export job would pay the full bootstrap (image
+# pull + apt + uv sync) again just to run this one command. Best-effort:
+# an export failure must not mark a successful training as failed.
+if [ "$TRAIN_RC" -eq 0 ] && [ "${AUTO_EXPORT:-1}" = "1" ]; then
+    set +e
+    TASK_ID=${TRAIN_ARGS%% *}
+    # A run is logs/rsl_rl/<experiment>/<stamp>_<name>/, and export opens
+    # --checkpoint-file as a path: hand it the path, not the file's name.
+    CKPT=$(ls -t logs/rsl_rl/*/*/model_*.pt 2>/dev/null | head -1)
+    if [ -n "$CKPT" ]; then
+        echo "[bootstrap] auto-exporting ONNX from $CKPT"
+        uv run python -m mjlab_microduck.export "$TASK_ID" \
+            --checkpoint-file "$CKPT" \
+            --num-envs 1 --onnx-file /work/policy.onnx \
+        && uv run python - <<'PY'
+import os
+from huggingface_hub import HfApi
+HfApi().upload_file(path_or_fileobj="/work/policy.onnx",
+                    path_in_repo="exported/policy.onnx",
+                    repo_id=os.environ["CKPT_REPO"], repo_type="model")
+print("[bootstrap] uploaded exported/policy.onnx")
+PY
+        [ $? -ne 0 ] && echo "[bootstrap] auto-export failed (training still OK)"
+    else
+        echo "[bootstrap] no checkpoint found, skipping auto-export"
+    fi
+    set -e
+fi
+"""
+
 # Bootstrap script run inside the container. `$VAR` is expanded by the
 # container shell from the job's env vars.
 BOOTSTRAP = r"""
@@ -91,35 +124,7 @@ echo "[bootstrap] training exited with code $TRAIN_RC, final upload pass"
 # kill watcher loop, then run one final upload pass synchronously
 kill $UPLOADER_PID 2>/dev/null || true
 CKPT_ONE_SHOT=1 uv run python -m mjlab_microduck.hf_uploader || true
-
-# Auto-export the final checkpoint to daemon-ready ONNX while the env is
-# still warm — a separate export job would pay the full bootstrap (image
-# pull + apt + uv sync) again just to run this one command. Best-effort:
-# an export failure must not mark a successful training as failed.
-if [ "$TRAIN_RC" -eq 0 ] && [ "${AUTO_EXPORT:-1}" = "1" ]; then
-    set +e
-    TASK_ID=${TRAIN_ARGS%% *}
-    CKPT=$(ls -t logs/rsl_rl/*/*/model_*.pt 2>/dev/null | head -1)
-    if [ -n "$CKPT" ]; then
-        echo "[bootstrap] auto-exporting ONNX from $(basename "$CKPT")"
-        uv run python -m mjlab_microduck.export "$TASK_ID" \
-            --checkpoint-file "$CKPT" \
-            --num-envs 1 --onnx-file /work/policy.onnx \
-        && uv run python - <<'PY'
-import os
-from huggingface_hub import HfApi
-HfApi().upload_file(path_or_fileobj="/work/policy.onnx",
-                    path_in_repo="exported/policy.onnx",
-                    repo_id=os.environ["CKPT_REPO"], repo_type="model")
-print("[bootstrap] uploaded exported/policy.onnx")
-PY
-        [ $? -ne 0 ] && echo "[bootstrap] auto-export failed (training still OK)"
-    else
-        echo "[bootstrap] no checkpoint found, skipping auto-export"
-    fi
-    set -e
-fi
-
+""" + EXPORT_STEP + r"""
 exit $TRAIN_RC
 """
 
