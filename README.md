@@ -227,7 +227,7 @@ uv run publish --onnx output.onnx --repo <user>/microduck-bow --kind episodic --
 uv run publish --onnx output.onnx --repo <user>/microduck-deep-bow --kind episodic --duration-s 5.0 \
     --base-model <owner>/microduck-polite-bow
 
-# A performance for the Arena's Swag Contest: the policy, and the timeline the Arena plays
+# A performance for the Arena's MicroDuck Got a Talent: the policy, and the timeline the Arena plays
 uv run publish --onnx output.onnx --repo <user>/microduck-my-swag --kind perpetual --slot sitstand \
     --timeline timeline.json
 
