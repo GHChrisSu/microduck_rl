@@ -8,6 +8,7 @@ ever travels over https, or to this machine for a local `arena serve`.
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -22,6 +23,16 @@ _THIS_MACHINE = {"127.0.0.1", "localhost"}
 
 class EnterError(RuntimeError):
     """The Arena did not enter the policy. The message is its answer."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the token to wherever it points: it is the Arena's answer, a 3xx."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 @dataclass(frozen=True)
@@ -58,15 +69,21 @@ def enter(arena: str, event: str, token: str, *, repo: str, revision: str, name:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=ENTER_TIMEOUT_S) as answer:
-            body = json.load(answer)
+        with _OPENER.open(request, timeout=ENTER_TIMEOUT_S) as answer:
+            raw = answer.read()
     except urllib.error.HTTPError as e:
         raise EnterError(f"{e.code}: {_detail(e)}") from None
-    except (urllib.error.URLError, TimeoutError) as e:
+    # OSError: no connection, a time-out, a hang-up (urllib leaves one while reading unwrapped);
+    # HTTPException: an answer cut short, or one that is not HTTP.
+    except (OSError, http.client.HTTPException) as e:
         raise EnterError(f"{arena} did not answer: {getattr(e, 'reason', e)}") from None
-    return Entry(run_id=body["run_id"], score=body["score"], seeds_finished=body["seeds_finished"],
-                 seeds_total=body["seeds_total"], command_vx=body["command_vx"], page_url=body["page_url"],
-                 already=bool(body.get("already_entered")))
+    try:
+        body = json.loads(raw)
+        return Entry(run_id=body["run_id"], score=body["score"], seeds_finished=body["seeds_finished"],
+                     seeds_total=body["seeds_total"], command_vx=body["command_vx"], page_url=body["page_url"],
+                     already=bool(body.get("already_entered")))
+    except (ValueError, KeyError, TypeError) as e:
+        raise EnterError(f"the Arena's answer was not an entry: {type(e).__name__}: {e}") from None
 
 
 def _detail(e: urllib.error.HTTPError) -> str:

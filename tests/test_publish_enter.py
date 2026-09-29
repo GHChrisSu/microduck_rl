@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -59,29 +60,50 @@ def hub(monkeypatch):
     return FakeHub
 
 
-@pytest.fixture
-def arena():
-    """The Arena's submit route: records each request, answers `reply`."""
+@contextmanager
+def _server():
+    """A local HTTP server: records each request, answers `reply` (`hangup`: reads it and closes)."""
     seen = []
-    reply = {"status": 200, "type": "application/json", "body": json.dumps(ENTERED)}
+    reply = {"status": 200, "type": "application/json", "body": json.dumps(ENTERED), "headers": {},
+             "hangup": False}
 
-    class Submit(BaseHTTPRequestHandler):
+    class Recorder(BaseHTTPRequestHandler):
         def do_POST(self):
-            length = int(self.headers["Content-Length"])
+            length = int(self.headers.get("Content-Length", 0))
             fields = {k: v[0] for k, v in parse_qs(self.rfile.read(length).decode()).items()}
             seen.append({"path": self.path, "authorization": self.headers.get("Authorization"), "fields": fields})
+            if reply["hangup"]:
+                return
             self.send_response(reply["status"])
             self.send_header("Content-Type", reply["type"])
+            for header, value in reply["headers"].items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(reply["body"].encode())
+
+        do_GET = do_POST
 
         def log_message(self, *args):
             pass
 
-    server = HTTPServer(("127.0.0.1", 0), Submit)
+    server = HTTPServer(("127.0.0.1", 0), Recorder)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield SimpleNamespace(url=f"http://127.0.0.1:{server.server_port}", seen=seen, reply=reply)
     server.shutdown()
+
+
+@pytest.fixture
+def arena():
+    """The Arena's submit route."""
+    with _server() as server:
+        yield server
+
+
+@pytest.fixture
+def elsewhere():
+    """Another host, where a redirect from the Arena would point."""
+    with _server() as server:
+        yield server
 
 
 def _publish(tmp_path, monkeypatch, **fields):
@@ -136,6 +158,49 @@ def test_a_gateway_error_page_is_said_not_crashed_on(tmp_path, monkeypatch, fake
     arena.reply.update(status=502, type="text/html", body="<html><h1>Bad Gateway</h1></html>")
     assert _publish(tmp_path, monkeypatch, arena=arena.url) == 3
     assert "did not enter it: 502: Bad Gateway" in capsys.readouterr().err
+
+
+def _not_entered(capsys) -> str:
+    """What publish said, once it has checked the upload is named and the token is not."""
+    out, err = capsys.readouterr()
+    assert (f"[publish] uploaded https://huggingface.co/alice/microduck-sprint/commit/{REV}, "
+            "but the Arena did not enter it: ") in err
+    assert "hf_test" not in out + err
+    return err
+
+
+def test_an_arena_that_hangs_up_without_answering_is_said(tmp_path, monkeypatch, fake_mjlab, sprint_challenge,
+                                                          hub, arena, capsys):
+    arena.reply["hangup"] = True
+    assert _publish(tmp_path, monkeypatch, arena=arena.url) == 3
+    assert f"did not enter it: {arena.url} did not answer: " in _not_entered(capsys)
+
+
+def test_an_answer_cut_short_is_said(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena, capsys):
+    arena.reply["headers"] = {"Content-Length": "1000"}
+    assert _publish(tmp_path, monkeypatch, arena=arena.url) == 3
+    assert f"did not enter it: {arena.url} did not answer: " in _not_entered(capsys)
+
+
+def test_an_html_answer_is_not_an_entry(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena, capsys):
+    arena.reply.update(type="text/html", body="<html><h1>Welcome</h1></html>")
+    assert _publish(tmp_path, monkeypatch, arena=arena.url) == 3
+    assert "did not enter it: the Arena's answer was not an entry: " in _not_entered(capsys)
+
+
+def test_an_answer_without_a_run_id_is_not_an_entry(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub,
+                                                    arena, capsys):
+    arena.reply["body"] = json.dumps({k: v for k, v in ENTERED.items() if k != "run_id"})
+    assert _publish(tmp_path, monkeypatch, arena=arena.url) == 3
+    assert "did not enter it: the Arena's answer was not an entry: " in _not_entered(capsys)
+
+
+def test_a_redirect_is_not_followed_with_the_token(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena,
+                                                   elsewhere, capsys):
+    arena.reply.update(status=302, body="", headers={"Location": f"{elsewhere.url}/api/events/sprint-2m/submit"})
+    assert _publish(tmp_path, monkeypatch, arena=arena.url) == 3
+    assert "did not enter it: 302" in _not_entered(capsys)
+    assert elsewhere.seen == []
 
 
 def test_an_arena_that_does_not_answer_is_said(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, capsys):
