@@ -429,7 +429,7 @@ def test_calm_anchor_split():
 def test_calm_anchor_wired():
     bc = vs.MicroduckVelStandRlCfg.algorithm.bc_cfg
     if vs.ENABLE_CALM_ANCHOR:
-        assert bc["anchor_max_ang_vel"] == vs.ANCHOR_MAX_ANG_VEL and bc["catch_to_expert"] is True
+        assert bc["anchor_max_ang_vel"] == vs.ANCHOR_MAX_ANG_VEL and bc["catch_to_expert"] is vs.CATCH_TO_EXPERT
         assert tuple(bc["ang_vel_slice"]) == (0, 3)  # base_ang_vel leads the 61D actor obs
         assert bc["catch_recent_fall_s"] == vs.RECENT_FALL_WINDOW_S
         ev = vs.make_microduck_velstand_env_cfg().events["track_recent_fall"]

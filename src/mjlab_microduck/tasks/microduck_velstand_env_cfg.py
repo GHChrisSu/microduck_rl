@@ -307,6 +307,14 @@ EXPERT_BC_GATE_TILT_DEG = 35.0
 ENABLE_CALM_ANCHOR = True
 ANCHOR_MAX_ANG_VEL = 2.0    # rad/s; upright walking |ω| p99 = 1.8
 RECENT_FALL_WINDOW_S = 2.0
+# Run rqunethx (catch → stand expert, resumed fhathosb@3750, +1500): rise smoother
+# (past-vertical p50 5° → 2°, settle p90 0.7 → 0.3 s) but WALKING less stable (push
+# falls 0 → 5 % @0.3 m/s, 9 → 21 % backward; sway tilt p50 1.8 → 3.0°). The catch
+# frames are 99 % genuine end-of-rise (pre-first-settle), but in OBS space they look
+# like push stumbles, so the network blends the stand expert's catch into its walking
+# stumble reactions (a hand-coded router with fall history cannot show this). Fix:
+# catch frames get NO teacher — unanchored, PPO alone — stumbles keep the walk anchor.
+CATCH_TO_EXPERT = False
 
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
@@ -756,7 +764,7 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
         symmetry_cfg=None,
         bc_cfg={
             **default_bc_cfg(), "coef": EXPERT_BC_COEF, "gate_tilt_deg": EXPERT_BC_GATE_TILT_DEG,
-            **({"anchor_max_ang_vel": ANCHOR_MAX_ANG_VEL, "catch_to_expert": True,
+            **({"anchor_max_ang_vel": ANCHOR_MAX_ANG_VEL, "catch_to_expert": CATCH_TO_EXPERT,
                 "catch_recent_fall_s": RECENT_FALL_WINDOW_S} if ENABLE_CALM_ANCHOR else {}),
         } if ENABLE_EXPERT_BC else None,
     ),
