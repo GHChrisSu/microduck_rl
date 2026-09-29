@@ -28,13 +28,19 @@ class FakeHub:
     """huggingface_hub.HfApi, as publish uses it."""
 
     private = False
+    exists = False
     calls: list = []
 
     def __init__(self, *args, **kwargs):
         pass
 
+    def repo_exists(self, repo):
+        return FakeHub.exists
+
     def create_repo(self, repo, **kwargs):
         FakeHub.calls.append(("create_repo", repo))
+        if not FakeHub.exists:  # as the Hub does: exist_ok keeps an existing repo's visibility
+            FakeHub.private, FakeHub.exists = kwargs["private"], True
 
     def repo_info(self, repo):
         return SimpleNamespace(private=FakeHub.private)
@@ -54,7 +60,7 @@ class FakeHub:
 def hub(monkeypatch):
     import huggingface_hub
 
-    FakeHub.private, FakeHub.calls = False, []
+    FakeHub.private, FakeHub.exists, FakeHub.calls = False, False, []
     monkeypatch.setattr(huggingface_hub, "HfApi", FakeHub)
     monkeypatch.setenv("HF_TOKEN", "hf_test")
     return FakeHub
@@ -110,8 +116,8 @@ def _publish(tmp_path, monkeypatch, **fields):
     from mjlab_microduck.publish.cli import PublishConfig, run
 
     monkeypatch.chdir(tmp_path)
-    return run(PublishConfig(repo="alice/microduck-sprint", run=str(_run_dir(tmp_path)), private=False,
-                             enter=True, **fields))
+    return run(PublishConfig(repo="alice/microduck-sprint", run=str(_run_dir(tmp_path)), enter=True,
+                             **{"private": False, **fields}))
 
 
 def test_enter_races_the_revision_just_uploaded_with_the_token(tmp_path, monkeypatch, fake_mjlab,
@@ -220,13 +226,31 @@ def test_the_token_travels_only_over_https_or_to_this_machine(url, tmp_path, mon
     assert fake_mjlab == [] and hub.calls == [], "refused before the export and the upload"
 
 
-def test_a_private_repo_is_refused_before_the_upload(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub,
-                                                     arena, capsys):
-    hub.private = True
+@pytest.mark.parametrize("private", [True, False])
+def test_an_existing_private_repo_is_refused_before_the_upload(private, tmp_path, monkeypatch, fake_mjlab,
+                                                               sprint_challenge, hub, arena, capsys):
+    hub.exists, hub.private = True, True  # --no-private or not: an existing repo keeps its visibility
     with pytest.raises(SystemExit):
-        _publish(tmp_path, monkeypatch, arena=arena.url)
+        _publish(tmp_path, monkeypatch, arena=arena.url, private=private)
     assert "public" in capsys.readouterr().err
-    assert ("upload_folder", "alice/microduck-sprint") not in hub.calls and arena.seen == []
+    assert hub.calls == [("create_repo", "alice/microduck-sprint")] and arena.seen == []
+
+
+def test_a_new_repo_made_private_is_refused_before_it_is_created(tmp_path, monkeypatch, fake_mjlab,
+                                                                 sprint_challenge, hub, arena, capsys):
+    """Created private, it would be refused, and kept private on every retry: a refusal loop."""
+    with pytest.raises(SystemExit):
+        _publish(tmp_path, monkeypatch, arena=arena.url, private=True)
+    assert ("--enter needs a public repo: pass --no-private (a new repo is created private by default)"
+            in capsys.readouterr().err)
+    assert hub.calls == [] and arena.seen == []
+
+
+def test_an_existing_public_repo_enters_without_no_private(tmp_path, monkeypatch, fake_mjlab, sprint_challenge,
+                                                           hub, arena):
+    hub.exists = True
+    assert _publish(tmp_path, monkeypatch, arena=arena.url, private=True) == 0
+    assert len(arena.seen) == 1
 
 
 def test_enter_needs_a_token(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena, capsys):

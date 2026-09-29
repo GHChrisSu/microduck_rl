@@ -367,10 +367,12 @@ def run(cfg: PublishConfig) -> int:
         api = HfApi()
         if cfg.base_model is not None and not api.repo_exists(cfg.base_model, repo_type="model"):
             _fail(f"--base-model {cfg.base_model}: no such model repo on the Hub (or no access)")
+        # Not created at all: a repo created private stays private on every retry (exist_ok keeps it).
+        if cfg.enter and cfg.private and not api.repo_exists(cfg.repo):
+            _fail("--enter needs a public repo: pass --no-private (a new repo is created private by default)")
         api.create_repo(cfg.repo, repo_type="model", private=cfg.private, exist_ok=True)
         if cfg.enter and api.repo_info(cfg.repo).private:
-            _fail(f"{cfg.repo} is private and the Arena reads public repos only: pass --no-private for a new "
-                  "repo, or make it public on the Hub")
+            _fail(f"{cfg.repo} is private and the Arena reads public repos only: make it public on the Hub")
         existing = set(api.list_repo_files(cfg.repo))
         onnx_files = {f for f in existing if f.endswith(".onnx")}
         if onnx_files and not cfg.force:
