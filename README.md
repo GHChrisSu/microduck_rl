@@ -201,6 +201,9 @@ with one command, no daemon release needed.
 # uploaded next to policy.onnx. A library task (no challenge) still takes --kind.
 uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint
 
+# --enter also enters it on the Microduck Arena and prints its time and page.
+uv run publish --run logs/rsl_rl/<experiment>/<run> --repo <you>/microduck-<name> --no-private --enter
+
 # From a wandb run — exports through the one safe path, then uploads
 uv run publish --task Mjlab-PoliteBow-Flat-MicroDuck \
     --wandb-run-path <entity/project/run_id> --checkpoint 3000 \

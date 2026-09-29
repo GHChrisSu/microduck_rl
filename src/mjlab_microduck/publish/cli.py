@@ -4,6 +4,9 @@
     # checkpoint exported and uploaded too, the recipe in the model card
     uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint
 
+    # Published and entered on the Arena in one go (a challenge's run knows its event)
+    uv run publish --run logs/rsl_rl/sprint/2026-09-25_10-00-00_first --repo <user>/microduck-sprint --no-private --enter
+
     # From a wandb run (exports with the normalizer baked in — the only safe path from a checkpoint)
     uv run publish --task Mjlab-PoliteBow-Flat-MicroDuck --wandb-run-path ent/proj/run --checkpoint 3000 \\
         --repo <user>/microduck-polite-bow --kind episodic --duration-s 4.0
@@ -35,6 +38,7 @@ import tyro
 
 from mjlab_microduck import challenge as ch, provenance
 from mjlab_microduck.publish import manifest as m
+from mjlab_microduck.publish.arena import ARENA, EnterError, check_arena, enter, entered_line
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,21 @@ class PublishConfig:
     """The pose the policy expects to start from."""
     twist_help: str | None = None
     """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]')."""
+
+    # -- entering it on the Arena
+    enter: bool = False
+    """After the upload, enter the policy on the Arena, at the revision just made."""
+    arena: str = ARENA
+    """--enter: the Arena. https, or http on 127.0.0.1 for a local `arena serve`."""
+    event: str | None = None
+    """The Arena event, for a policy that is not a challenge's (--onnx, a library task). Also
+    written as the manifest's `arena.event`."""
+    livery: str = "classic"
+    """--enter: its colour on the Arena's board."""
+    speed: float | None = None
+    """--enter: a forward speed to be timed at, in m/s. Left out, the Arena sweeps the event's range."""
+    code_url: str | None = None
+    """--enter: a link to the code that trained it, shown on its row."""
 
     # -- how
     private: bool = True
@@ -266,6 +285,12 @@ def run(cfg: PublishConfig) -> int:
     video = Path(cfg.video) if cfg.video is not None else None
     if video is not None and (not video.is_file() or video.suffix.lower() != ".mp4"):
         _fail(f"--video {cfg.video}: expected an existing .mp4 file")
+    arena = None
+    if cfg.enter:  # before anything is exported: a token must not go where this points
+        try:
+            arena = check_arena(cfg.arena)
+        except ValueError as e:
+            _fail(str(e))
 
     workdir = Path(tempfile.mkdtemp(prefix="microduck-publish-"))
     try:
@@ -282,6 +307,11 @@ def run(cfg: PublishConfig) -> int:
         # challenge.toml (registered when mjlab imported the task), not from flags.
         task_id = training.get("task_id")
         found = ch.for_task(task_id) if task_id else None
+        if found and cfg.event:
+            _fail(f"{task_id} is the {found.event} challenge's task: --event is for a policy that is not a challenge's")
+        event = found.event if found else cfg.event
+        if cfg.enter and not event:
+            _fail("--enter needs the event to enter: this policy is not a challenge's, so pass --event <id>")
         kind = _kind(cfg, task_id)
         accessories = tuple(cfg.accessories) if cfg.onnx is not None else _accessories_of_task(task_id)
 
@@ -306,7 +336,7 @@ def run(cfg: PublishConfig) -> int:
             command_help=command_help,
             training=training,
             accessories=accessories,
-            arena={"event": found.event} if found else None,
+            arena={"event": event} if event else None,
         )
         m.validate_manifest(manifest)
 
@@ -329,12 +359,18 @@ def run(cfg: PublishConfig) -> int:
             print(f"[publish] dry run: wrote {dest}/ (policy.onnx, manifest.json, README.md{extra})")
             return 0
 
-        from huggingface_hub import HfApi
+        from huggingface_hub import HfApi, get_token
 
+        token = get_token() if cfg.enter else None
+        if cfg.enter and not token:
+            _fail("--enter needs your Hugging Face token: `hf auth login`, or HF_TOKEN")
         api = HfApi()
         if cfg.base_model is not None and not api.repo_exists(cfg.base_model, repo_type="model"):
             _fail(f"--base-model {cfg.base_model}: no such model repo on the Hub (or no access)")
         api.create_repo(cfg.repo, repo_type="model", private=cfg.private, exist_ok=True)
+        if cfg.enter and api.repo_info(cfg.repo).private:
+            _fail(f"{cfg.repo} is private and the Arena reads public repos only: pass --no-private for a new "
+                  "repo, or make it public on the Hub")
         existing = set(api.list_repo_files(cfg.repo))
         onnx_files = {f for f in existing if f.endswith(".onnx")}
         if onnx_files and not cfg.force:
@@ -356,6 +392,14 @@ def run(cfg: PublishConfig) -> int:
             print(f"[publish] tagged {cfg.tag}")
         first = m.install_commands(manifest, cfg.repo).splitlines()[0]
         print(f"[publish] on a robot: {first}")
+        if cfg.enter:
+            try:
+                entry = enter(arena, event, token, repo=cfg.repo, revision=commit.oid, name=name,
+                              livery=cfg.livery, speed=cfg.speed, code_url=cfg.code_url)
+            except EnterError as e:
+                print(f"[publish] uploaded {url}, but the Arena did not enter it: {e}", file=sys.stderr)
+                return 3
+            print(entered_line(event, entry))
         return 0
     except m.ManifestError as e:
         _fail(str(e))
