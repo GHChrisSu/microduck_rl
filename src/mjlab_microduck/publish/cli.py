@@ -26,6 +26,7 @@ local directory and stops.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import sys
@@ -95,6 +96,9 @@ class PublishConfig:
     """The pose the policy expects to start from."""
     twist_help: str | None = None
     """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]')."""
+    timeline: str | None = None
+    """A stage event's performance (timeline.json): uploaded at the repo root beside policy.onnx.
+    The Arena checks its format; publish refuses only a file that is not JSON."""
 
     # -- entering it on the Arena
     enter: bool = False
@@ -123,7 +127,7 @@ class PublishConfig:
     smoke: bool = True
     """Run the network on plausible inputs and refuse NaNs before uploading."""
     dry_run: bool = False
-    """Write policy.onnx, manifest.json and README.md to ./publish-<name>/ and stop."""
+    """Write policy.onnx, manifest.json and README.md (and checkpoint.pt, timeline.json when given) to ./publish-<name>/ and stop."""
     device: str | None = None
     """Export device. Default: cuda:0 if available, else cpu."""
 
@@ -278,6 +282,16 @@ def _default_name(repo: str) -> str:
     return stem.removeprefix("microduck-").removeprefix("microduck_") or stem
 
 
+def _read_timeline(path: str) -> bytes:
+    """The --timeline file's bytes, refused unless they parse as JSON."""
+    try:
+        data = Path(path).read_bytes()
+        json.loads(data)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        _fail(f"--timeline {path}: not a readable JSON file ({e})")
+    return data
+
+
 def run(cfg: PublishConfig) -> int:
     if "/" not in cfg.repo:
         _fail("--repo must be `<user-or-org>/<name>`")
@@ -291,6 +305,7 @@ def run(cfg: PublishConfig) -> int:
             arena = check_arena(cfg.arena)
         except ValueError as e:
             _fail(str(e))
+    timeline = _read_timeline(cfg.timeline) if cfg.timeline else None  # refuse before the export
 
     workdir = Path(tempfile.mkdtemp(prefix="microduck-publish-"))
     try:
@@ -349,6 +364,8 @@ def run(cfg: PublishConfig) -> int:
         (staged / "README.md").write_text(m.render_readme(manifest, cfg.repo, cfg.base_model))
         if video is not None:
             shutil.copyfile(video, staged / m.REPLAY_FILE)
+        if timeline is not None:
+            (staged / "timeline.json").write_bytes(timeline)
 
         if cfg.dry_run:
             dest = Path.cwd() / f"publish-{name}"
@@ -357,6 +374,7 @@ def run(cfg: PublishConfig) -> int:
             shutil.copytree(staged, dest)
             extra = ", checkpoint.pt" if checkpoint is not None else ""
             extra += f", {m.REPLAY_FILE}" if video is not None else ""
+            extra += ", timeline.json" if timeline is not None else ""
             print(f"[publish] dry run: wrote {dest}/ (policy.onnx, manifest.json, README.md{extra})")
             return 0
 
