@@ -406,3 +406,57 @@ def test_prone_spawn_adds_terrain_origin_z():
     z = env.sim.data.qpos[:, 2]
     assert torch.allclose(z, torch.tensor([0.07, 0.37, 0.19, 0.12]), atol=1e-6)
     assert (torch.rad2deg(torch.acos((1 - 2 * (env.sim.data.qpos[:, 4] ** 2 + env.sim.data.qpos[:, 5] ** 2)).clamp(-1, 1))) > 89).all()
+
+
+def test_calm_anchor_split():
+    """Anchor keeps calm upright frames; fast sub-gate frames (the rise catch) go to the stand expert."""
+    from mjlab_microduck.tasks.distill import split_calm_anchor
+    obs = torch.zeros(4, 61)
+    obs[1, 0] = 1.5   # calm walking wobble → anchored
+    obs[2, 1] = 3.0   # catching the end of a rise → expert
+    obs[3, 2] = 5.0   # spinning while fallen → already expert (fallen), not double-counted
+    upright = torch.tensor([True, True, True, False]); fallen = torch.tensor([False, False, False, True])
+    anc, catch = split_calm_anchor(obs, upright, fallen, (0, 3), 2.0, catch_to_expert=True)
+    assert anc.tolist() == [True, True, False, False] and catch.tolist() == [False, False, True, False]
+    anc, catch = split_calm_anchor(obs, upright, fallen, (0, 3), 2.0, catch_to_expert=False)
+    assert anc.tolist() == [True, True, False, False] and not catch.any()
+    # recent-fall restriction: a spinning frame WITHOUT a recent fall is a push stumble → stays anchored
+    recent = torch.tensor([False, False, False, True])
+    anc, catch = split_calm_anchor(obs, upright, fallen, (0, 3), 2.0, catch_to_expert=True, recent_fall=recent)
+    assert anc.tolist() == [True, True, True, False] and not catch.any()
+
+
+def test_calm_anchor_wired():
+    bc = vs.MicroduckVelStandRlCfg.algorithm.bc_cfg
+    if vs.ENABLE_CALM_ANCHOR:
+        assert bc["anchor_max_ang_vel"] == vs.ANCHOR_MAX_ANG_VEL and bc["catch_to_expert"] is True
+        assert tuple(bc["ang_vel_slice"]) == (0, 3)  # base_ang_vel leads the 61D actor obs
+        assert bc["catch_recent_fall_s"] == vs.RECENT_FALL_WINDOW_S
+        ev = vs.make_microduck_velstand_env_cfg().events["track_recent_fall"]
+        assert ev.mode == "step" and ev.params["window_s"] == vs.RECENT_FALL_WINDOW_S
+    assert bc["coef"] == 1.0 and bc["anchor_coef"] == 1.0  # teacher strengths unchanged
+
+
+def test_track_recent_fall_ring():
+    """Timer resets on fall, expires after the window, clears on episode reset; ring row = (counter-1) % T."""
+    class _D:
+        root_link_pos_w = torch.tensor([[0.0, 0.0, 0.11]] * 2)
+        root_link_quat_w = torch.tensor([[1.0, 0.0, 0.0, 0.0]] * 2)
+    class _T:
+        env_origins = torch.zeros(2, 3)
+    class _S(dict):
+        terrain = _T()
+    class _E:
+        device = "cpu"; num_envs = 2; step_dt = 0.5; common_step_counter = 0
+        episode_length_buf = torch.tensor([5, 5])
+    e = _E(); e.scene = _S(robot=type("A", (), {"data": _D()})()); e._recent_fall_ring = torch.zeros(4, 2, dtype=torch.bool)
+    def step(fallen0):
+        _D.root_link_quat_w = torch.tensor([[0.7071, 0.7071, 0.0, 0.0] if fallen0 else [1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+        e.common_step_counter += 1
+        microduck_mdp.track_recent_fall(e, None, window_s=1.0)
+        return e._recent_fall_ring[(e.common_step_counter - 1) % 4].tolist()
+    assert step(True) == [True, False]     # env 0 fell (90° roll); env 1 never did
+    assert step(False) == [True, False]    # 0.5 s after
+    assert step(False) == [False, False]   # 1.0 s → window expired
+    step(True); e.episode_length_buf = torch.tensor([0, 5])
+    assert step(False) == [False, False]   # reset clears the history

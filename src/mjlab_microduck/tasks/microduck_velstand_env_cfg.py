@@ -293,6 +293,21 @@ ENABLE_EXPERT_BC = True
 EXPERT_BC_COEF = 1.0
 EXPERT_BC_GATE_TILT_DEG = 35.0
 
+# Calm-anchor handoff (2026-09-29, branch velstand_improve). Robot: stand-ups
+# "often fall back and front". Bench (claude_experiments/velstand_improve_bench.py,
+# prod fhathosb@3750): the student's rise = the stand expert's (same ω, |a_z|, time)
+# but it overshoots past vertical 3x more (p50 5° vs 1°). Emulating the BC targets
+# (stand expert > 25° tilt, walk expert below) reproduces it — 6° p50, 10 % re-falls
+# with a weak battery — while handing over only once |ω| < 2 rad/s gives 2°. So:
+# walk anchor only on CALM upright frames; the fast catch goes to the stand expert.
+# Only within RECENT_FALL_WINDOW_S of a fall (env-side ring, mdp.track_recent_fall):
+# push stumbles are indistinguishable in the obs (same tilt/|ω| distributions), and
+# giving them to the stand expert doubled falls under 0.5 m/s pushes (emulated) —
+# they keep the walk anchor. Settle after a rise is p90 < 1 s, so 2 s covers the catch.
+ENABLE_CALM_ANCHOR = True
+ANCHOR_MAX_ANG_VEL = 2.0    # rad/s; upright walking |ω| p99 = 1.8
+RECENT_FALL_WINDOW_S = 2.0
+
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
 FALLEN_SMOOTHNESS_SCALE = 0.1
@@ -604,6 +619,14 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
         },
     )
 
+    # Calm-anchor gate history (see ENABLE_CALM_ANCHOR): feeds distill's recent-fall ring.
+    if ENABLE_CALM_ANCHOR and ENABLE_EXPERT_BC:
+        cfg.events["track_recent_fall"] = EventTermCfg(
+            func=microduck_mdp.track_recent_fall,
+            mode="step",
+            params={"tilt_deg": REWARD_GATE_TILT_DEG, "window_s": RECENT_FALL_WINDOW_S},
+        )
+
     # ── Terminations ──────────────────────────────────────────────────────────
     # Failed-recovery backstop (see module docstring, Phase 2).
     cfg.terminations["fallen_too_long"] = TerminationTermCfg(
@@ -731,7 +754,11 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
         desired_kl=0.01,
         max_grad_norm=1.0,
         symmetry_cfg=None,
-        bc_cfg={**default_bc_cfg(), "coef": EXPERT_BC_COEF, "gate_tilt_deg": EXPERT_BC_GATE_TILT_DEG} if ENABLE_EXPERT_BC else None,
+        bc_cfg={
+            **default_bc_cfg(), "coef": EXPERT_BC_COEF, "gate_tilt_deg": EXPERT_BC_GATE_TILT_DEG,
+            **({"anchor_max_ang_vel": ANCHOR_MAX_ANG_VEL, "catch_to_expert": True,
+                "catch_recent_fall_s": RECENT_FALL_WINDOW_S} if ENABLE_CALM_ANCHOR else {}),
+        } if ENABLE_EXPERT_BC else None,
     ),
     wandb_project="mjlab_microduck",
     experiment_name="velstand",

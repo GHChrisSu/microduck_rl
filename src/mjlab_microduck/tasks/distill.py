@@ -79,6 +79,18 @@ def default_bc_cfg() -> dict:
         "anchor_checkpoint_path": None,
         "anchor_coef": 1.0,
         "anchor_tilt_deg": 25.0,
+        # Calm-anchor gate (2026-09-29): anchor only frames with |base_ang_vel| below
+        # this (rad/s, raw obs[ang_vel_slice]). None = off (tilt-only, the old behaviour).
+        "anchor_max_ang_vel": None,
+        # With the calm gate on: sub-gate-tilt frames rotating faster than the gate
+        # (the CATCH at the end of a rise) are taught by the stand expert instead of
+        # being left to PPO alone.
+        "catch_to_expert": False,
+        "ang_vel_slice": (0, 3),
+        # Restrict the calm gate to frames within this many seconds of a fall (env-side
+        # ring written by mdp.track_recent_fall). None = gate every spinning frame —
+        # which also hands push STUMBLES to the stand expert (doubled push falls, measured).
+        "catch_recent_fall_s": None,
     }
 
 
@@ -96,6 +108,30 @@ def fallen_mask_from_obs(obs: torch.Tensor, gravity_slice: tuple[int, int], gate
     g = g / g.norm(dim=1, keepdim=True).clamp_min(1e-6)  # obs noise / IMU DR: renormalize
     cos_tilt = -g[:, 2]
     return cos_tilt < torch.cos(torch.deg2rad(torch.tensor(gate_tilt_deg, device=obs.device)))
+
+
+def split_calm_anchor(
+    obs: torch.Tensor, upright: torch.Tensor, fallen: torch.Tensor, ang_vel_slice: tuple[int, int],
+    max_ang_vel: float, catch_to_expert: bool, recent_fall: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Calm-anchor gate: (anchored frames, catch frames for the stand expert).
+
+    Why (2026-09-29, prod fhathosb@3750): the student copies the stand expert's rise
+    exactly, but overshoots past vertical ~3x more (p50 5° vs 1°). Emulating the BC
+    targets — stand expert above 25° tilt, walk expert below — reproduces it (6°, and
+    10 % re-falls with a weak battery): the walk anchor teaches the CATCH at the end of
+    a rise from a teacher that never saw one. Handing over only once |ω| < 2 rad/s
+    brings the emulation back to ~2°. Walking |ω| is p99 1.8 rad/s, so every normal
+    gait frame stays anchored. ``recent_fall`` (env history) limits the gate to rises:
+    push stumbles look identical in the obs, and teaching them from the stand expert
+    doubled falls under 0.5 m/s pushes (emulated) — they keep the walk anchor.
+    """
+    w = obs[:, ang_vel_slice[0]:ang_vel_slice[1]].norm(dim=1)
+    spinning = w >= max_ang_vel
+    if recent_fall is not None:
+        spinning = spinning & recent_fall
+    catch = spinning & ~fallen if catch_to_expert else torch.zeros_like(fallen)
+    return upright & ~spinning, catch
 
 
 def expert_input(obs: torch.Tensor, twist_slice: tuple[int, int]) -> torch.Tensor:
@@ -128,11 +164,23 @@ def _resolve_checkpoint(bc_cfg: dict, prefix: str = "") -> Path | None:
 
 
 class PpoWithExpertBc(PPO):
+    @staticmethod
+    def construct_algorithm(obs, env, cfg, device):
+        alg = PPO.construct_algorithm(obs, env, cfg, device)
+        # Recent-fall ring for the calm-anchor gate: mdp.track_recent_fall (step event)
+        # writes row (common_step_counter - 1) % T each env step, so row s ↔ storage slot s.
+        if isinstance(alg, PpoWithExpertBc) and alg.expert is not None and (alg.bc_cfg or {}).get("catch_recent_fall_s") is not None:
+            u = getattr(env, "unwrapped", env)
+            alg._env_unwrapped = u
+            u._recent_fall_ring = torch.zeros(alg.storage.num_transitions_per_env, env.num_envs, dtype=torch.bool, device=device)
+        return alg
+
     def __init__(self, actor, critic, storage, *args, bc_cfg: dict | None = None, **kwargs) -> None:
         super().__init__(actor, critic, storage, *args, **kwargs)
         self.bc_cfg = bc_cfg
         self.expert = None
         self.anchor = None
+        self._env_unwrapped = None
         if bc_cfg:
             ckpt = torch.load(_resolve_checkpoint(bc_cfg), map_location=self.device, weights_only=False)
             self.expert = load_expert_from(self.actor, ckpt["actor_state_dict"]).to(self.device)
@@ -160,7 +208,22 @@ class PpoWithExpertBc(PPO):
         gsl = tuple(cfg["gravity_slice"])
         fallen = fallen_mask_from_obs(flat, gsl, cfg["gate_tilt_deg"])
         upright = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) if self.anchor is not None else torch.zeros_like(fallen)
-        stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item()}
+        catch = torch.zeros_like(fallen)
+        recent_frac = float("nan")
+        if cfg.get("anchor_max_ang_vel") is not None:
+            recent = None
+            if cfg.get("catch_recent_fall_s") is not None:
+                u = self._env_unwrapped
+                ring = getattr(u, "_recent_fall_ring", None) if u is not None else None
+                aligned = ring is not None and getattr(u, "common_step_counter", 0) % ring.shape[0] == 0
+                # Misaligned / missing ring (should not happen): gate nothing rather than everything.
+                recent = ring.flatten() if aligned else torch.zeros_like(fallen)
+                recent_frac = recent.float().mean().item()
+            upright, catch = split_calm_anchor(flat, upright, fallen, tuple(cfg.get("ang_vel_slice", (0, 3))),
+                                               cfg["anchor_max_ang_vel"], cfg.get("catch_to_expert", False), recent)
+        stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item(),
+                 "expert_bc_catch_frac": catch.float().mean().item(), "expert_bc_recent_fall_frac": recent_frac}
+        fallen = fallen | catch
         if fallen.sum().item() < cfg["min_samples"]:
             fallen = torch.zeros_like(fallen)  # too few fallen frames: anchor-only pass (or nothing)
         use = fallen | upright

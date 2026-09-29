@@ -1102,6 +1102,34 @@ def fallen_too_long(
     return env._fallen_timer_s >= max_duration_s
 
 
+def track_recent_fall(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    tilt_deg: float = 40.0,
+    window_s: float = 2.0,
+) -> None:
+    """Step event: per-env "fell within the last `window_s`" flag → env._recent_fall_ring.
+
+    For velstand's calm-anchor gate (distill.py): the obs cannot tell the fast CATCH
+    at the end of a rise from a push stumble while walking (same tilt and |ω|
+    distributions, measured 2026-09-29), but routing stumbles to the stand expert
+    doubled push falls — so the gate needs this env-side history. The algorithm
+    attaches the [T, N] ring (aligned with rollout storage); without it this is a
+    no-op beyond keeping the timer.
+    """
+    del env_ids
+    asset: Entity = env.scene[asset_cfg.name]
+    fallen = _fallen_mask(env, asset, 0.0, tilt_deg).bool()  # tilt only (z 0 never gates)
+    if not hasattr(env, "_since_fall_s"):
+        env._since_fall_s = torch.full((env.num_envs,), 1e6, device=env.device)
+    env._since_fall_s[env.episode_length_buf == 0] = 1e6  # freshly reset: no fall history
+    env._since_fall_s = torch.where(fallen, torch.zeros_like(env._since_fall_s), env._since_fall_s + env.step_dt)
+    ring = getattr(env, "_recent_fall_ring", None)
+    if ring is not None:
+        ring[(env.common_step_counter - 1) % ring.shape[0]] = env._since_fall_s < window_s
+
+
 def robot_state_is_nan(
     env: ManagerBasedRlEnv,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
