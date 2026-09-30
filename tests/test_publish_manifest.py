@@ -346,10 +346,10 @@ def test_the_cli_dry_run_stages_a_timeline_beside_the_policy(tmp_path, monkeypat
     timeline.write_text('{"timeline_version": 1, "duration_s": 20.0, "keyframes": [{"t": 0.0}]}\n')
     monkeypatch.chdir(tmp_path)
     assert run(PublishConfig(
-        repo="someone/microduck-swag", kind="perpetual", onnx=str(policy), slot="sitstand",
+        repo="someone/microduck-talent", kind="perpetual", onnx=str(policy), slot="sitstand",
         timeline=str(timeline), dry_run=True,
     )) == 0
-    out = tmp_path / "publish-swag"
+    out = tmp_path / "publish-talent"
     assert (out / "timeline.json").read_bytes() == timeline.read_bytes()
     assert "timeline" not in json.loads((out / "manifest.json").read_text())
     assert f"dry run: wrote {out}/ (policy.onnx, manifest.json, README.md, timeline.json)\n" in capsys.readouterr().out
@@ -363,11 +363,11 @@ def test_a_timeline_that_is_not_json_is_refused_before_anything_is_built(tmp_pat
     bad.write_text("{nope")
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit) as exit_:
-        run(PublishConfig(repo="someone/microduck-swag", kind="perpetual", onnx=str(policy),
+        run(PublishConfig(repo="someone/microduck-talent", kind="perpetual", onnx=str(policy),
                           timeline=str(bad), dry_run=True))
     assert exit_.value.code == 2
     assert "--timeline" in capsys.readouterr().err
-    assert not (tmp_path / "publish-swag").exists()
+    assert not (tmp_path / "publish-talent").exists()
 
 
 def test_a_utf16_timeline_is_refused_like_the_arena_reads_it(tmp_path, monkeypatch, capsys):
@@ -380,11 +380,11 @@ def test_a_utf16_timeline_is_refused_like_the_arena_reads_it(tmp_path, monkeypat
     bad.write_bytes('{"timeline_version": 1, "duration_s": 20.0, "keyframes": [{"t": 0.0}]}'.encode("utf-16"))
     monkeypatch.chdir(tmp_path)
     with pytest.raises(SystemExit) as exit_:
-        run(PublishConfig(repo="someone/microduck-swag", kind="perpetual", onnx=str(policy),
+        run(PublishConfig(repo="someone/microduck-talent", kind="perpetual", onnx=str(policy),
                           timeline=str(bad), dry_run=True))
     assert exit_.value.code == 2
     assert "--timeline" in capsys.readouterr().err
-    assert not (tmp_path / "publish-swag").exists()
+    assert not (tmp_path / "publish-talent").exists()
 
 
 def _manifest_with_training(training: dict) -> dict:

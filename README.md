@@ -228,7 +228,7 @@ uv run publish --onnx output.onnx --repo <user>/microduck-deep-bow --kind episod
     --base-model <owner>/microduck-polite-bow
 
 # A performance for the Arena's MicroDuck Got a Talent: the policy, and the timeline the Arena plays
-uv run publish --onnx output.onnx --repo <user>/microduck-my-swag --kind perpetual --slot sitstand \
+uv run publish --onnx output.onnx --repo <user>/microduck-my-talent --kind perpetual --slot sitstand \
     --timeline timeline.json
 
 # See what would be uploaded without touching the Hub
