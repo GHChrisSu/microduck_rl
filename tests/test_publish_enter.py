@@ -11,6 +11,7 @@ import socket
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs
 
@@ -48,8 +49,9 @@ class FakeHub:
     def list_repo_files(self, repo):
         return []
 
-    def upload_folder(self, repo_id, **kwargs):
+    def upload_folder(self, repo_id, folder_path, **kwargs):
         FakeHub.calls.append(("upload_folder", repo_id))
+        FakeHub.uploaded = {p.name: p.read_bytes() for p in Path(folder_path).iterdir()}
         return SimpleNamespace(oid=REV, commit_url=f"https://huggingface.co/{repo_id}/commit/{REV}")
 
     def create_tag(self, *args, **kwargs):
@@ -139,6 +141,15 @@ def test_a_sweep_sends_no_speed_and_no_code_link(tmp_path, monkeypatch, fake_mjl
     fields = arena.seen[0]["fields"]
     assert "command_vx" not in fields and "env_url" not in fields
     assert fields["livery"] == "classic"
+
+
+def test_a_timeline_is_in_the_revision_entered(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena):
+    """--timeline with --enter: the Arena is sent the revision whose upload carries timeline.json."""
+    timeline = tmp_path / "moves.json"
+    timeline.write_text('{"timeline_version": 1, "duration_s": 20.0, "keyframes": [{"t": 0.0}]}\n')
+    assert _publish(tmp_path, monkeypatch, arena=arena.url, timeline=str(timeline)) == 0
+    assert hub.uploaded["timeline.json"] == timeline.read_bytes()
+    assert arena.seen[0]["fields"]["revision"] == REV
 
 
 def test_an_entry_already_on_the_board_is_said(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena,
