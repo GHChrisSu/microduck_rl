@@ -44,6 +44,7 @@ class Entry:
     command_vx: float
     page_url: str
     already: bool
+    course: str = "lane"
 
 
 def check_arena(url: str) -> str:
@@ -81,7 +82,7 @@ def enter(arena: str, event: str, token: str, *, repo: str, revision: str, name:
         body = json.loads(raw)
         return Entry(run_id=body["run_id"], score=body["score"], seeds_finished=body["seeds_finished"],
                      seeds_total=body["seeds_total"], command_vx=body["command_vx"], page_url=body["page_url"],
-                     already=bool(body.get("already_entered")))
+                     already=bool(body.get("already_entered")), course=body.get("course", "lane"))
     except (ValueError, KeyError, TypeError) as e:
         raise EnterError(f"the Arena's answer was not an entry: {type(e).__name__}: {e}") from None
 
@@ -97,5 +98,9 @@ def _detail(e: urllib.error.HTTPError) -> str:
 
 def entered_line(event: str, entry: Entry) -> str:
     said = "already entered" if entry.already else "entered"
+    if entry.course == "stage":
+        # A performance has no time, seeds or speed: its length is the only number it has.
+        played = f"a {entry.score:.2f} s performance" if entry.seeds_finished else "a performance cut short"
+        return f"[publish] {said} on {event}: {played} → {entry.page_url}"
     return (f"[publish] {said} on {event}: {entry.score:.3f} s ({entry.seeds_finished}/{entry.seeds_total} "
             f"seeds) at {entry.command_vx:.2f} m/s → {entry.page_url}")

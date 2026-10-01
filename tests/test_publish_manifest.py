@@ -707,3 +707,27 @@ def test_an_onnx_publish_takes_accessories_from_the_flag(tmp_path, monkeypatch):
                              accessories=("rollers",), dry_run=True)) == 0
     manifest = json.loads((tmp_path / "publish-glide" / "manifest.json").read_text())
     assert manifest["robot"]["accessories"] == ["rollers"]
+
+
+def test_the_challenges_command_help_is_in_the_manifest_and_a_flag_overrides_it(tmp_path, monkeypatch, fake_mjlab):
+    import json
+
+    from mjlab_microduck import challenge as ch
+    from mjlab_microduck.publish.cli import PublishConfig, run
+
+    monkeypatch.setattr(ch, "_REGISTRY", {})
+    folder = tmp_path / "sprint_2m"
+    folder.mkdir()
+    (folder / "challenge.toml").write_text(
+        'event = "sprint-2m"\ntask = "Mjlab-Sprint2m-MicroDuck"\nkind = "perpetual"\n'
+        '[command]\ntwist = "[sit flag; unused; unused]"\nhead = "4 head deltas, rad"\n'
+    )
+    (folder / "tasks.py").write_text("")
+    ch.register(folder / "tasks.py")
+    monkeypatch.chdir(tmp_path)
+    assert run(PublishConfig(repo="alice/microduck-sprint", run=str(_run_dir(tmp_path)), dry_run=True,
+                             twist_help="[vx, vy, wz]")) == 0
+    command = json.loads((tmp_path / "publish-sprint" / "manifest.json").read_text())["command"]
+    assert command["twist"] == "[vx, vy, wz]"
+    assert command["head"] == "4 head deltas, rad"
+    assert command["body"] == "unused (zeros)"

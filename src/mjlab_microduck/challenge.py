@@ -13,6 +13,9 @@ registration in `tasks.py`, and its contract in `challenge.toml` next to them:
     value = 2.0
     min = 0.5
     max = 5.0
+    [command]                            # what the policy reads in each command group, for the manifest
+    twist = "[sit flag; unused; unused]"
+    head  = "4 head deltas, rad"
 
 `tasks.py` calls `register(__file__)` next to mjlab's `register_mjlab_task`, so `publish`
 finds the event and the kind from the task id and needs only `--repo`. `env.py` calls
@@ -39,6 +42,7 @@ class Challenge:
     task: str
     kind: str
     recipe: dict[str, Any] = field(default_factory=dict)
+    command: dict[str, str] = field(default_factory=dict)
 
 
 _REGISTRY: dict[str, Challenge] = {}
@@ -58,12 +62,17 @@ def load(tasks_file: str | Path) -> Challenge:
             raise ValueError(f"{path}: no `{key}`")
     if table["kind"] not in KINDS:
         raise ValueError(f"{path}: kind must be one of {KINDS}, not {table['kind']!r}")
+    command = table.get("command", {})
+    unknown = sorted(set(command) - {"twist", "head", "body"})
+    if unknown:
+        raise ValueError(f"{path}: [command] says what twist, head and body mean, not {unknown}")
     return Challenge(
         folder=path.parent,
         event=str(table["event"]),
         task=str(table["task"]),
         kind=str(table["kind"]),
         recipe=dict(table.get("recipe", {})),
+        command={group: str(text) for group, text in command.items()},
     )
 
 

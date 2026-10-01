@@ -307,3 +307,10 @@ def test_without_enter_nothing_goes_to_the_arena(tmp_path, monkeypatch, fake_mjl
     assert run(PublishConfig(repo="alice/microduck-sprint", run=str(_run_dir(tmp_path)), private=False,
                              arena=arena.url)) == 0
     assert arena.seen == []
+
+
+def test_a_stage_entry_is_said_as_a_performance(tmp_path, monkeypatch, fake_mjlab, sprint_challenge, hub, arena, capsys):
+    arena.reply["body"] = json.dumps(ENTERED | {"score": 20.0, "seeds_finished": 1, "seeds_total": 1,
+                                                "command_vx": 0.0, "course": "stage"})
+    assert _publish(tmp_path, monkeypatch, arena=arena.url) == 0
+    assert f"[publish] entered on sprint-2m: a 20.00 s performance → {PAGE}" in capsys.readouterr().out

@@ -95,7 +95,8 @@ class PublishConfig:
     entry_pose: str = "standing"
     """The pose the policy expects to start from."""
     twist_help: str | None = None
-    """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]')."""
+    """Prose for `command.twist` when the slots mean something (flamingo: '[flag, side, 0]').
+    Default: the challenge's."""
     timeline: str | None = None
     """A stage event's performance (timeline.json): uploaded at the repo root beside policy.onnx.
     The Arena checks its format; publish refuses only a file that is not JSON."""
@@ -338,7 +339,9 @@ def run(cfg: PublishConfig) -> int:
             m.smoke_run_onnx(onnx_path)
             print("[publish] smoke run: finite, non-constant output")
 
-        command_help = {"twist": cfg.twist_help} if cfg.twist_help else None
+        # What each command group means: the challenge's challenge.toml says it once for every publish
+        # of its task; --twist-help overrides the twist's for one.
+        command_help = {**(found.command if found else {}), **({"twist": cfg.twist_help} if cfg.twist_help else {})} or None
         manifest = m.build_manifest(
             name=name,
             kind=kind,

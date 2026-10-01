@@ -91,3 +91,14 @@ def test_a_wrong_contract_is_named(tmp_path, toml, why):
 def test_a_knob_without_a_value_is_named(tmp_path):
     with pytest.raises(ValueError, match="params.forward_reward"):
         ch.params(_folder(tmp_path, TOML.replace("value = 2.0\n", "")) / "env.py")
+
+
+def test_a_challenge_says_what_its_commands_mean(tmp_path):
+    folder = _folder(tmp_path, TOML + '\n[command]\ntwist = "[sit flag; unused; unused]"\nhead = "4 head deltas, rad"\n')
+    assert ch.load(folder / "tasks.py").command == {"twist": "[sit flag; unused; unused]", "head": "4 head deltas, rad"}
+
+
+def test_a_command_group_the_policy_does_not_have_is_named(tmp_path):
+    folder = _folder(tmp_path, TOML + '\n[command]\nlegs = "?"\n')
+    with pytest.raises(ValueError, match="legs"):
+        ch.load(folder / "tasks.py")
