@@ -306,7 +306,7 @@ def test_the_cli_dry_run_writes_a_repo(tmp_path, monkeypatch, capsys):
     assert f"dry run: wrote {out}/ (policy.onnx, manifest.json, README.md)\n" in capsys.readouterr().out
 
 
-def test_the_cli_ships_a_video_as_replay_mp4_and_nowhere_else(tmp_path, monkeypatch):
+def test_the_cli_ships_a_video_as_replay_mp4_and_nowhere_else(tmp_path, monkeypatch, capsys):
     """The Hub's replay widget finds `replay.mp4` by name; the manifest and README stay silent."""
     from mjlab_microduck.publish.cli import PublishConfig, run
 
@@ -323,6 +323,7 @@ def test_the_cli_ships_a_video_as_replay_mp4_and_nowhere_else(tmp_path, monkeypa
     assert (out / m.REPLAY_FILE).read_bytes() == clip.read_bytes()
     for text in ((out / "manifest.json").read_text(), (out / "README.md").read_text()):
         assert "mp4" not in text and "bow_take3" not in text
+    assert f"dry run: wrote {out}/ (policy.onnx, manifest.json, README.md, replay.mp4)\n" in capsys.readouterr().out
 
 
 def test_the_cli_refuses_a_missing_video(tmp_path):

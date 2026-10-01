@@ -356,6 +356,7 @@ def run(cfg: PublishConfig) -> int:
                 shutil.rmtree(dest)
             shutil.copytree(staged, dest)
             extra = ", checkpoint.pt" if checkpoint is not None else ""
+            extra += f", {m.REPLAY_FILE}" if video is not None else ""
             print(f"[publish] dry run: wrote {dest}/ (policy.onnx, manifest.json, README.md{extra})")
             return 0
 
