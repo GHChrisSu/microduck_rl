@@ -28,6 +28,11 @@ import numpy as np
 WIDTH = 640
 HEIGHT = 360
 
+# The physical IMX219 head camera delivers the same full ~62° horizontal field at 16:9. MuJoCo's
+# default 45° vertical FOV would be ~72.7° horizontal at this resolution, so derive the vertical
+# angle that preserves the physical horizontal field when rendering the twin.
+HORIZONTAL_FOV_DEG = 62.0
+
 # The sensor's rate is 30, but a rendered frame costs 12 ms and a duck that is being watched is
 # usually being watched rather than raced. 15 halves the cost for something nobody can see.
 FPS = 15
@@ -71,28 +76,34 @@ class Camera:
         if self.camera < 0:
             raise SystemExit(f"the model has no camera {name!r}")
 
+        model.cam_fovy[self.camera] = np.degrees(
+            2.0
+            * np.arctan(
+                (height / width) * np.tan(np.radians(HORIZONTAL_FOV_DEG / 2.0))
+            )
+        )
+
         # **The model's head camera faces backwards.** Measured against the duck's own forward axis
         # and the ToF site's: the camera's view direction is -x where both of those are +x, exactly
         # 180 degrees out. On screen that is a duck apparently seeing what is behind it — a cyan cube
         # it is walking away from, sitting in frame.
         #
         # Turned 180 degrees about the camera's own **right** axis — not its up axis, which was the
-        # first attempt and came out upside down. Both turns fix the direction; only this one leaves
-        # the image the same way up. What the console has to undo is set by where the camera's right
-        # axis points: the original camera has it along the world's *down*, and a yaw turn moves it
-        # to *up*, so the quarter turn the console applies lands 180 degrees out.
+        # first attempt and came out upside down — to point the camera forward. The physical module
+        # is mounted a quarter turn off, but the local simulation preview should be landscape and
+        # upright. A further 90-degree roll around the optical axis compensates for that mount; the
+        # sim launcher advertises `rotate=0` to the browser and detector. The horizontal FOV stays
+        # matched while the person stands upright in a landscape frame.
         #
-        # A roll turn keeps right pointing down, so a rendered frame comes out on its side exactly as
-        # the original did — which is correct, because the real head camera is mounted a quarter turn
-        # off and every consumer already expects that. `mediad --rotate 90` stays true of a simulated
-        # duck for the same reason it is true of a real one.
-        #
-        # Done here rather than in the MJCF, because that file belongs to the RL work and a camera
-        # nothing in training uses is not worth a change they have to review.
+        # Done here rather than in the MJCF, because this is a preview calibration for the twin,
+        # not a change to the camera pose used by policy training.
         turn = np.array([0.0, 1.0, 0.0, 0.0])  # 180 degrees about x, scalar-first
         fixed = np.zeros(4)
         mujoco.mju_mulQuat(fixed, model.cam_quat[self.camera], turn)
-        model.cam_quat[self.camera] = fixed
+        landscape_roll = np.array([np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)])
+        upright = np.zeros(4)
+        mujoco.mju_mulQuat(upright, fixed, landscape_roll)
+        model.cam_quat[self.camera] = upright
         self.renderer = mujoco.Renderer(model, height=height, width=width)
         self.width = width
         self.height = height

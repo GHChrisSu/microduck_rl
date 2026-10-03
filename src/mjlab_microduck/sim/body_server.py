@@ -48,6 +48,7 @@ import socketserver
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 import mujoco
 import numpy as np
@@ -181,6 +182,56 @@ class World:
         self.data = mujoco.MjData(self.model)
         self.lock = threading.Lock()
         self.bodies: list[Body] = []
+        self.target_motion: dict[str, Any] | None = None
+
+    def move_mocap_target(
+        self,
+        name: str,
+        amplitude: float,
+        period: float,
+        lateral_amplitude: float = 1.2,
+        run_speed: float = 0.10,
+    ) -> None:
+        """Animate a named mocap target; the lesson person runs straight ahead."""
+        body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if body_id < 0:
+            raise SystemExit(f"the scene has no body named {name!r}")
+        mocap_id = int(self.model.body_mocapid[body_id])
+        if mocap_id < 0:
+            raise SystemExit(f"scene body {name!r} is not a mocap body")
+        base = self.model.body_pos[body_id].copy()
+        parts: dict[str, int] = {name: mocap_id}
+        motion: dict[str, Any] = {
+            "name": name,
+            "parts": parts,
+            "base": base,
+            "amplitude": amplitude,
+            "period": period,
+        }
+        if name == "follow_person":
+            part_names = (
+                "follow_person_head",
+                "follow_person_left_thigh", "follow_person_left_calf",
+                "follow_person_right_thigh", "follow_person_right_calf",
+                "follow_person_left_upper_arm", "follow_person_left_forearm",
+                "follow_person_right_upper_arm", "follow_person_right_forearm",
+            )
+            for part in part_names:
+                part_body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, part)
+                if part_body_id < 0:
+                    raise SystemExit(f"the running person is missing body {part!r}")
+                part_mocap_id = int(self.model.body_mocapid[part_body_id])
+                if part_mocap_id < 0:
+                    raise SystemExit(f"person body {part!r} is not a mocap body")
+                parts[part] = part_mocap_id
+                self.data.mocap_pos[part_mocap_id] = self.model.body_pos[part_body_id]
+
+            motion.update({
+                "run_speed": run_speed,
+            })
+        else:
+            self.data.mocap_pos[mocap_id] = base
+        self.target_motion = motion
 
     def step(self, times: int = 1) -> None:
         """Advance the world, taking the lock once for the whole batch.
@@ -193,6 +244,16 @@ class World:
         """
         with self.lock:
             for _ in range(times):
+                if self.target_motion is not None:
+                    if self.target_motion["name"] == "follow_person":
+                        self._animate_person(float(self.data.time))
+                    else:
+                        parts = self.target_motion["parts"]
+                        mocap_id = parts[self.target_motion["name"]]
+                        self.data.mocap_pos[mocap_id] = self.target_motion["base"]
+                        self.data.mocap_pos[mocap_id, 1] += self.target_motion["amplitude"] * np.sin(
+                            2.0 * np.pi * self.data.time / self.target_motion["period"]
+                        )
                 mujoco.mj_step(self.model, self.data)
                 # A duck nobody has enabled yet is put back where it was. Physics is shared, so
                 # it cannot simply not be stepped — and a hand steadying one robot while another
@@ -200,6 +261,84 @@ class World:
                 for body in self.bodies:
                     if not body.released:
                         body.restore()
+
+    def _animate_person(self, sim_time: float) -> None:
+        """Run the person forward without a route boundary, turning, or scheduled stops."""
+        assert self.target_motion is not None
+        motion = self.target_motion
+        parts: dict[str, int] = motion["parts"]
+        base: np.ndarray = motion["base"]
+        speed = float(motion["run_speed"])
+        # The camera faces world +X. The model's nose is on its local -X side, so yaw=pi
+        # points the runner's face and body along the same unbounded +X path.
+        position = base[:2] + np.array([speed * sim_time, 0.0])
+        yaw = np.pi
+        root = base.copy()
+        root[:2] = position
+
+        # Continuous alternating arm/leg motion and a small run bounce, with no pauses or jumps
+        # that could cause the visual target box to jump in size during tracking.
+        stride_rate = 1.65
+        stride_phase = 2.0 * np.pi * stride_rate * sim_time
+        gait_weight = 1.0
+        body_lift = 0.014 * (0.5 + 0.5 * np.cos(2.0 * stride_phase))
+
+        root_quat = np.array([np.cos(yaw / 2.0), 0.0, 0.0, np.sin(yaw / 2.0)])
+        for name in ("follow_person", "follow_person_head"):
+            mocap_id = parts[name]
+            self.data.mocap_pos[mocap_id] = root + [0.0, 0.0, body_lift]
+            self.data.mocap_quat[mocap_id] = root_quat
+
+        def world_point(local: np.ndarray) -> np.ndarray:
+            c, s = np.cos(yaw), np.sin(yaw)
+            x = c * local[0] - s * local[1]
+            y = s * local[0] + c * local[1]
+            return root + np.array([x, y, local[2] + body_lift])
+
+        def set_segment(name: str, start: np.ndarray, end: np.ndarray) -> None:
+            start_world = world_point(start)
+            end_world = world_point(end)
+            axis = end_world - start_world
+            axis /= max(float(np.linalg.norm(axis)), 1e-9)
+            # Quaternion (w, x, y, z) rotating the capsule's local +Z axis to its limb.
+            quat = np.array([1.0 + axis[2], -axis[1], axis[0], 0.0])
+            quat_norm = float(np.linalg.norm(quat))
+            if quat_norm < 1e-8:
+                quat = np.array([0.0, 1.0, 0.0, 0.0])
+            else:
+                quat /= quat_norm
+            mocap_id = parts[name]
+            self.data.mocap_pos[mocap_id] = 0.5 * (start_world + end_world)
+            self.data.mocap_quat[mocap_id] = quat
+
+        for side, phase_offset in ((-1.0, 0.0), (1.0, np.pi)):
+            phase = stride_phase + phase_offset
+            stride = np.sin(phase) * gait_weight
+            hip = np.array([0.0, side * 0.115, 0.90])
+            knee = np.array([0.27 * stride, side * 0.13, 0.49])
+            ankle = np.array([
+                0.27 * stride + 0.13 * np.sin(phase + 0.8) * gait_weight,
+                side * 0.13,
+                0.07 + 0.13 * max(0.0, np.sin(phase + 0.8)) * gait_weight,
+            ])
+            prefix = "left" if side < 0 else "right"
+            set_segment(f"follow_person_{prefix}_thigh", hip, knee)
+            set_segment(f"follow_person_{prefix}_calf", ankle, knee)
+
+            arm_phase = phase + np.pi
+            shoulder = np.array([0.0, side * 0.19, 1.38])
+            elbow = np.array([
+                0.16 * np.sin(arm_phase) * gait_weight,
+                side * 0.28,
+                1.10,
+            ])
+            wrist = np.array([
+                0.30 * np.sin(arm_phase + 0.35) * gait_weight,
+                side * 0.34,
+                0.84,
+            ])
+            set_segment(f"follow_person_{prefix}_upper_arm", shoulder, elbow)
+            set_segment(f"follow_person_{prefix}_forearm", elbow, wrist)
 
 
 class Body:
@@ -511,6 +650,35 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=7801, help="the first duck's port; +1 each")
     parser.add_argument("--headless", action="store_true", help="no viewer window")
     parser.add_argument(
+        "--move-target",
+        metavar="BODY",
+        help="animate a named target; follow_person runs continuously forward",
+    )
+    parser.add_argument(
+        "--target-motion-amplitude",
+        type=float,
+        default=1.2,
+        help="side-to-side amplitude for targets other than follow_person",
+    )
+    parser.add_argument(
+        "--target-motion-period",
+        type=float,
+        default=12.0,
+        help="oscillation period for targets other than follow_person",
+    )
+    parser.add_argument(
+        "--target-motion-lateral-amplitude",
+        type=float,
+        default=1.2,
+        help="accepted for compatibility; follow_person runs straight and ignores lateral motion",
+    )
+    parser.add_argument(
+        "--target-motion-speed",
+        type=float,
+        default=0.10,
+        help="continuous forward speed in m/s for follow_person; other targets ignore it",
+    )
+    parser.add_argument(
         "--cameras",
         default="",
         help="which ducks render a head camera, by letter — `a`, `a,c`, or `all`. Opt in, because a "
@@ -541,8 +709,19 @@ def main() -> None:
         )
     if args.ducks < 1:
         raise SystemExit("--ducks needs at least one duck")
+    if (args.target_motion_amplitude < 0 or args.target_motion_lateral_amplitude < 0
+            or args.target_motion_period <= 0 or args.target_motion_speed <= 0):
+        raise SystemExit("target-motion distances must be non-negative, period and speed positive")
 
     world = World(args.scene, args.ducks)
+    if args.move_target:
+        world.move_mocap_target(
+            args.move_target,
+            args.target_motion_amplitude,
+            args.target_motion_period,
+            args.target_motion_lateral_amplitude,
+            args.target_motion_speed,
+        )
     pose, trunk_z = pose_table(args.scene, args.keyframe)
     wanted = set()
     if args.cameras.strip() == "all":
@@ -573,6 +752,20 @@ def main() -> None:
             servers.append(frames)
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
+    if args.move_target:
+        if args.move_target == "follow_person":
+            print(
+                f"==   person running continuously along +X at {args.target_motion_speed:.2f} m/s, "
+                "with an alternating running gait and no route boundary",
+                flush=True,
+            )
+        else:
+            print(
+                f"==   moving {args.move_target} side-to-side: amplitude "
+                f"{args.target_motion_amplitude:.2f} m, time scale "
+                f"{args.target_motion_period:.1f} s",
+                flush=True,
+            )
     for index in range(args.ducks):
         eye = f" · camera on {args.host}:{args.frame_port + index}" if index in wanted else ""
         print(f"==   duck {index}: robotd --sim {args.host}:{args.port + index}{eye}", flush=True)
